@@ -43,7 +43,19 @@ If you find that the code is useful in your research, please consider citing our
       --temp 0.5 \
       --seed 0
   ```
-    
+
+### Generate Parses for Sentences
+
+**Note: Download `stanford-corenlp` instead of `stanford-parser`!**
+
+> To run your own sentences through the pretrained model, first parse them using Stanford CoreNLP. We used CoreNLP version 3.7.0 for the results in the paper, along with the Shift-Reduce Parser models (https://nlp.stanford.edu/software/stanford-srparser-2014-10-23-models.jar). More concretely, the command we ran to parse the ParaNMT dataset used in our paper is:
+
+```sh
+java -Xmx12g -cp "*" edu.stanford.nlp.pipeline.StanfordCoreNLP -threads 1 -annotators tokenize,ssplit,pos,parse -ssplit.eolonly -filelist filenames.txt -outputFormat text -parse.model edu/stanford/nlp/models/srparser/englishSR.ser.gz -outputDirectory /outputdir/
+```
+
+Note: If you have only one file to process, change the argument `-filelist` to `-file`.
+
 ### Training
 
   - Download [data](https://drive.google.com/file/d/1OrQjD-TcSR83LtTxXCVOemldwOILtn8e/view?usp=sharing) and put them under `./data/` 
