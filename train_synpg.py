@@ -1,5 +1,6 @@
 import os, argparse, h5py, codecs
 import numpy as np
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,11 +9,16 @@ from nltk import ParentedTree
 from subwordnmt.apply_bpe import BPE, read_vocabulary
 from model import SynPG
 from utils import Timer, make_path, load_data, load_embedding, load_dictionary, deleaf, sent2str, synt2str
-from pprint import pprint
+from pprint import pprint, pformat
+
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_dir', type=str, default="./model/", 
                        help="directory to save models")
+parser.add_argument('--load_model', type=str, default="none",
+                       help="load pretrained model")
 parser.add_argument('--output_dir', type=str, default="./output/",
                        help="directory to save outputs")
 parser.add_argument('--bpe_codes_path', type=str, default='./data/bpe.codes',
@@ -25,6 +31,8 @@ parser.add_argument('--dictionary_path', type=str, default="./data/dictionary.pk
                        help="dictionary file")
 parser.add_argument('--train_data_path', type=str, default="./data/train_data.h5",
                        help="training data")
+parser.add_argument('--train_data_subset', type=int, default=-1,
+                       help="training data subset")
 parser.add_argument('--valid_data_path', type=str, default="./data/valid_data.h5",
                        help="validation data")
 parser.add_argument('--emb_path', type=str, default="./data/glove.840B.300d.txt", 
@@ -54,8 +62,32 @@ parser.add_argument('--temp', type=float, default=0.5,
 parser.add_argument('--seed', type=int, default=0, 
                        help="random seed")
 args = parser.parse_args()
-pprint(vars(args))
-print()
+
+# create folders
+make_path(args.model_dir)
+make_path(args.output_dir)
+
+import logging, time
+logging.basicConfig(
+    handlers=[
+        logging.FileHandler(
+            filename="./{}/log-{}.log".format(
+                args.model_dir,
+                time.strftime("%Y-%m-%dT%H%M%S", time.gmtime())
+            ),
+            encoding='utf-8'
+        ),
+        logging.StreamHandler()
+    ],
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+    level=logging.INFO
+)
+
+logger = logging.getLogger(__name__)
+
+logger.info(pformat(vars(args)))
+logger.info("")
 
 # fix random seed
 np.random.seed(args.seed)
@@ -66,6 +98,7 @@ def train(epoch, model, train_data, valid_data, train_loader, valid_loader, opti
     
     timer = Timer()
     n_it = len(train_loader)
+    num_sent_too_long = 0
     
     for it, data_idxs in enumerate(train_loader):
         model.train()
@@ -73,8 +106,15 @@ def train(epoch, model, train_data, valid_data, train_loader, valid_loader, opti
         data_idxs = np.sort(data_idxs.numpy())
         
         # get batch of raw sentences and raw syntax
-        sents_ = train_data[0][data_idxs]
-        synts_ = train_data[1][data_idxs]
+        # sents_ = train_data[0][data_idxs]
+        # synts_ = train_data[1][data_idxs]
+        sents_ = [train_data[0][i_] for i_ in data_idxs]
+        synts_ = [train_data[1][i_] for i_ in data_idxs]
+
+        # 不同数据，HDF5 文件读出来的格式不一样。LLJ
+        # if not isinstance(sents_[0], str):
+        #     sents_ = [s.decode("utf-8") for s in sents_]
+        #     synts_ = [s.decode("utf-8") for s in synts_]
             
         batch_size = len(sents_)
         
@@ -84,11 +124,13 @@ def train(epoch, model, train_data, valid_data, train_loader, valid_loader, opti
         targs = np.zeros((batch_size, args.max_sent_len+2), dtype=np.long)  # target output
         
         for i in range(batch_size):
-            
+            if len(sents_[i]) > sents.shape[1] or len(synts_[i]) > synts.shape[1]:
+                num_sent_too_long += 1
+                continue
             # bpe segment and convert to tensor
             sent_ = sents_[i]
-            sent_ = bpe.segment(sent_).split()
-            sent_ = [dictionary.word2idx[w] if w in dictionary.word2idx else dictionary.word2idx["<unk>"] for w in sent_]
+            # sent_ = bpe.segment(sent_).split()
+            # sent_ = [dictionary.word2idx[w] if w in dictionary.word2idx else dictionary.word2idx["<unk>"] for w in sent_]
             sents[i, :len(sent_)] = sent_
             
             # add <sos> and <eos> for target output
@@ -97,10 +139,10 @@ def train(epoch, model, train_data, valid_data, train_loader, valid_loader, opti
             
             # parse syntax and convert to tensor
             synt_ = synts_[i]
-            synt_ = ParentedTree.fromstring(synt_)
-            synt_ = deleaf(synt_)
-            synt_ = [dictionary.word2idx[f"<{w}>"] for w in synt_ if f"<{w}>" in dictionary.word2idx]
-            synt_ = [dictionary.word2idx["<sos>"]] + synt_ + [dictionary.word2idx["<eos>"]]
+            # synt_ = ParentedTree.fromstring(synt_)
+            # synt_ = deleaf(synt_)
+            # synt_ = [dictionary.word2idx[f"<{w}>"] for w in synt_ if f"<{w}>" in dictionary.word2idx]
+            # synt_ = [dictionary.word2idx["<sos>"]] + synt_ + [dictionary.word2idx["<eos>"]]
             synts[i, :len(synt_)] = synt_
             
         sents = torch.from_numpy(sents).cuda()
@@ -122,7 +164,7 @@ def train(epoch, model, train_data, valid_data, train_loader, valid_loader, opti
         if it % args.log_interval == 0:
             # print current loss
             valid_loss = evaluate(model, valid_data, valid_loader, criterion, dictionary, bpe, args)
-            print("| ep {:2d}/{} | it {:3d}/{} | {:5.2f} s | loss {:.4f} | g_norm {:.6f} | valid loss {:.4f} |".format(
+            logger.info("| ep {:2d}/{} | it {:3d}/{} | {:5.2f} s | loss {:.4f} | g_norm {:.6f} | valid loss {:.4f} |".format(
                 epoch, args.n_epoch, it, n_it, timer.get_time_from_last(), loss.item(), model.grad_norm, valid_loss))
             
         if it % args.gen_interval == 0:
@@ -132,6 +174,7 @@ def train(epoch, model, train_data, valid_data, train_loader, valid_loader, opti
         if it % args.save_interval == 0:
             # save model to args.model_dir
             torch.save(model.state_dict(), os.path.join(args.model_dir, "synpg_epoch{:02d}.pt".format(epoch)))
+    # logger.info("num_sent_too_long: ", num_sent_too_long)
             
 def evaluate(model, data, loader, criterion, dictionary, bpe, args):
     model.eval()
@@ -142,8 +185,10 @@ def evaluate(model, data, loader, criterion, dictionary, bpe, args):
             data_idxs = np.sort(data_idxs.numpy())
             
             # get batch of raw sentences and raw syntax
-            sents_ = data[0][data_idxs]
-            synts_ = data[1][data_idxs]
+            # sents_ = data[0][data_idxs]
+            # synts_ = data[1][data_idxs]
+            sents_ = [data[0][i_] for i_ in data_idxs]
+            synts_ = [data[1][i_] for i_ in data_idxs]
 
             batch_size = len(sents_)
             
@@ -156,8 +201,8 @@ def evaluate(model, data, loader, criterion, dictionary, bpe, args):
                 
                 # bpe segment and convert to tensor
                 sent_ = sents_[i]
-                sent_ = bpe.segment(sent_).split()
-                sent_ = [dictionary.word2idx[w] if w in dictionary.word2idx else dictionary.word2idx["<unk>"] for w in sent_]
+                # sent_ = bpe.segment(sent_).split()
+                # sent_ = [dictionary.word2idx[w] if w in dictionary.word2idx else dictionary.word2idx["<unk>"] for w in sent_]
                 sents[i, :len(sent_)] = sent_
                 
                 # add <sos> and <eos> for target output
@@ -166,10 +211,10 @@ def evaluate(model, data, loader, criterion, dictionary, bpe, args):
                 
                 # parse syntax and convert to tensor
                 synt_ = synts_[i]
-                synt_ = ParentedTree.fromstring(synt_)
-                synt_ = deleaf(synt_)
-                synt_ = [dictionary.word2idx[f"<{w}>"] for w in synt_ if f"<{w}>" in dictionary.word2idx]
-                synt_ = [dictionary.word2idx["<sos>"]] + synt_ + [dictionary.word2idx["<eos>"]]
+                # synt_ = ParentedTree.fromstring(synt_)
+                # synt_ = deleaf(synt_)
+                # synt_ = [dictionary.word2idx[f"<{w}>"] for w in synt_ if f"<{w}>" in dictionary.word2idx]
+                # synt_ = [dictionary.word2idx["<sos>"]] + synt_ + [dictionary.word2idx["<eos>"]]
                 synts[i, :len(synt_)] = synt_
 
             sents = torch.from_numpy(sents).cuda()
@@ -199,8 +244,10 @@ def generate(epoch, eit, model, data, loader, dictionary, bpe, args, max_it=10):
                 data_idxs = np.sort(data_idxs.numpy())
                 
                 # get batch of raw sentences and raw syntax
-                sents_ = data[0][data_idxs]
-                synts_ = data[1][data_idxs]
+                # sents_ = data[0][data_idxs]
+                # synts_ = data[1][data_idxs]
+                sents_ = [data[0][i_] for i_ in data_idxs]
+                synts_ = [data[1][i_] for i_ in data_idxs]
 
                 batch_size = len(sents_)
                 
@@ -213,8 +260,8 @@ def generate(epoch, eit, model, data, loader, dictionary, bpe, args, max_it=10):
                     
                     # bpe segment and convert to tensor
                     sent_ = sents_[i]
-                    sent_ = bpe.segment(sent_).split()
-                    sent_ = [dictionary.word2idx[w] if w in dictionary.word2idx else dictionary.word2idx["<unk>"] for w in sent_]
+                    # sent_ = bpe.segment(sent_).split()
+                    # sent_ = [dictionary.word2idx[w] if w in dictionary.word2idx else dictionary.word2idx["<unk>"] for w in sent_]
                     sents[i, :len(sent_)] = sent_
                     
                     # add <sos> and <eos> for target output
@@ -223,10 +270,10 @@ def generate(epoch, eit, model, data, loader, dictionary, bpe, args, max_it=10):
                     
                     # parse syntax and convert to tensor
                     synt_ = synts_[i]
-                    synt_ = ParentedTree.fromstring(synt_)
-                    synt_ = deleaf(synt_)
-                    synt_ = [dictionary.word2idx[f"<{w}>"] for w in synt_ if f"<{w}>" in dictionary.word2idx]
-                    synt_ = [dictionary.word2idx["<sos>"]] + synt_ + [dictionary.word2idx["<eos>"]]
+                    # synt_ = ParentedTree.fromstring(synt_)
+                    # synt_ = deleaf(synt_)
+                    # synt_ = [dictionary.word2idx[f"<{w}>"] for w in synt_ if f"<{w}>" in dictionary.word2idx]
+                    # synt_ = [dictionary.word2idx["<sos>"]] + synt_ + [dictionary.word2idx["<eos>"]]
                     synts[i, :len(synt_)] = synt_
             
                 sents = torch.from_numpy(sents).cuda()
@@ -243,7 +290,7 @@ def generate(epoch, eit, model, data, loader, dictionary, bpe, args, max_it=10):
                     fp.write(synt2str(idx, dictionary)+'\n')
                     fp.write("--\n")
 
-print("==== loading data ====")
+logger.info("==== loading data ====")
 
 # load bpe codes
 bpe_codes = codecs.open(args.bpe_codes_path, encoding='utf-8')
@@ -253,21 +300,106 @@ bpe = BPE(bpe_codes, '@@', bpe_vocab, None)
 
 # load dictionary and data
 dictionary = load_dictionary(args.dictionary_path)
-train_data = load_data(args.train_data_path)
-valid_data = load_data(args.valid_data_path)
+
+def preprocess_to_pt(file: str, args):
+    """
+    把 train 函数里的一些公共步骤提取出来。
+    提前进行 BPE 分词、parse format、token 映射 id 等操作。
+    不用每次训练的时候都重新做一次。
+    并且把预处理数据用 torch.save 保存，以后直接读取，无需再次处理。
+    by LLJ.
+    """
+
+    if os.path.exists(file + ".preprocessed.pt"):
+        logger.info("File has been preprocessed.")
+        return
+
+    logger.info("Loading data")
+    if file.endswith(".h5"):
+        data = load_data(file)
+    elif file.endswith(".txt"):
+        with open(file, "r") as f:
+            data = [s.strip().split("\t") for s in f.readlines()]
+            data = list(zip(*data))
+
+    logger.info("Processing data")
+    sents_, synts_ = data[0], data[1]
+
+    # 不同数据，HDF5 文件读出来的格式不一样。格式转换的时候，h5py 的版本 v2 和 v3 又不同，好麻烦。LLJ
+    if not isinstance(sents_[0], str):
+        logger.info("Decoding string")
+        try:
+            sents_ = sents_.asstr()
+            synts_ = synts_.asstr()
+        except Exception as e:
+            logger.info(e)
+            sents_ = [s.decode("utf-8") for s in tqdm(sents_)]
+            synts_ = [s.decode("utf-8") for s in tqdm(synts_)]
+
+    sents_fit_max_len, synts_fit_max_len = [], []
+    logger.info("BPE, tokenize, map to id")
+    for i in tqdm(range(len(sents_)), total=len(sents_)):
+        try:
+            # sents
+            sent_ = sents_[i]
+            sent_ = bpe.segment(sent_).split()
+            sent_ = [dictionary.word2idx[w] if w in dictionary.word2idx else dictionary.word2idx["<unk>"] for w in sent_]
+            # synts
+            synt_ = synts_[i]
+            synt_ = ParentedTree.fromstring(synt_)
+            synt_ = deleaf(synt_)
+            synt_ = [dictionary.word2idx[f"<{w}>"] for w in synt_ if f"<{w}>" in dictionary.word2idx]
+            synt_ = [dictionary.word2idx["<sos>"]] + synt_ + [dictionary.word2idx["<eos>"]]
+            sents_fit_max_len.append(sent_)
+            synts_fit_max_len.append(synt_)
+        except Exception as e:
+            # 有些数据是乱码，会出错，直接填充空的数据。不能丢弃，因为数据行号和 id 有关联。
+            sents_fit_max_len.append([dictionary.word2idx["<sos>"]] + [dictionary.word2idx["<eos>"]])
+            synts_fit_max_len.append([dictionary.word2idx["<sos>"]] + [dictionary.word2idx["<eos>"]])
+            pass
+
+    logger.info("{}/{} sentences of length within max length.".format(len(sents_fit_max_len), len(sents_)))
+
+    temp = {"sents": sents_fit_max_len, "synts": synts_fit_max_len}
+    torch.save(temp, file + ".preprocessed.pt")
+
+    return
+
+
+train_data_preprocessed, valid_data_preprocessed = False, False
+
+if not os.path.exists(args.train_data_path + ".preprocessed.pt"):
+    preprocess_to_pt(args.train_data_path, args)
+
+if not os.path.exists(args.valid_data_path + ".preprocessed.pt"):
+    preprocess_to_pt(args.valid_data_path, args)
+
+train_data = torch.load(args.train_data_path + ".preprocessed.pt")
+train_data = (train_data["sents"], train_data["synts"])
+
+valid_data = torch.load(args.valid_data_path + ".preprocessed.pt")
+valid_data = (valid_data["sents"], valid_data["synts"])
+
+if args.train_data_subset != -1:
+    train_data = (train_data[0][:args.train_data_subset], train_data[1][:args.train_data_subset])
 
 train_idxs = np.arange(len(train_data[0]))
 valid_idxs = np.arange(len(valid_data[0]))
-print(f"number of train examples: {len(train_data[0])}")
-print(f"number of valid examples: {len(valid_data[0])}")
+logger.info(f"number of train examples: {len(train_data[0])}")
+logger.info(f"number of valid examples: {len(valid_data[0])}")
 
 train_loader = DataLoader(train_idxs, batch_size=args.batch_size, shuffle=True)
 valid_loader = DataLoader(valid_idxs, batch_size=args.batch_size, shuffle=False)
 
 # build model and load initialized glove embedding
+# Bug to fix: words that are not in the pretrained glove embedding will be all zero initialized. (Linjian Li)
 embedding = load_embedding(args.emb_path, dictionary)
 model = SynPG(len(dictionary), 300, word_dropout=args.word_dropout)
 model.load_embedding(embedding)
+
+if args.load_model.lower() != "none":
+    logger.info("load pretrained model: {}".format(args.load_model))
+    model.load_state_dict(torch.load(args.load_model))
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 criterion = nn.CrossEntropyLoss(ignore_index=dictionary.word2idx["<pad>"])
@@ -275,11 +407,15 @@ criterion = nn.CrossEntropyLoss(ignore_index=dictionary.word2idx["<pad>"])
 model = model.cuda()
 criterion = criterion.cuda()
 
-# create folders
-make_path(args.model_dir)
-make_path(args.output_dir)
+total_params = 0
+for name, parameter in model.named_parameters():
+    if not parameter.requires_grad:
+        continue
+    num_param = parameter.numel()
+    total_params += num_param
+logger.info("Total Trainable Params: {}".format(total_params))
 
-print("==== start training ====")
+logger.info("==== start training ====")
 for epoch in range(1, args.n_epoch+1):
     # training
     train(epoch, model, train_data, valid_data, train_loader, valid_loader, optimizer, criterion, dictionary, bpe, args)
