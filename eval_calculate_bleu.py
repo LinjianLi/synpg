@@ -3,12 +3,8 @@ import numpy as np
 from nltk.translate.bleu_score import sentence_bleu
 from pprint import pprint
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--ref', type=str, default="./eval/target_sents.txt")
-parser.add_argument('--input', type=str, default="./eval/outputs.txt")
-args = parser.parse_args()
-pprint(vars(args))
-print()
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)  # Mute NLTK BLEU warning.
 
 def cal_bleu(hyp, ref, n):
     hyp = hyp.strip().split(' ')
@@ -27,17 +23,25 @@ def cal_bleu(hyp, ref, n):
 
     return sentence_bleu([ref], hyp, weights=weights)
 
-with open(args.ref) as fp:
-    targs = fp.readlines()
+if __name__ == "__main__":
 
-with open(args.input) as fp:
-    preds = fp.readlines()
-    
-assert len(targs) == len(preds)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--ref', type=str, default="./eval/target_sents.txt")
+    parser.add_argument('--input', type=str, default="./eval/outputs.txt")
+    args = parser.parse_args()
+    pprint(vars(args))
+    print()
 
-print(f"number of examples: {len(preds)}")
+    with open(args.ref) as fp:
+        targs = fp.readlines()
 
-scores = [cal_bleu(pred, targ, 0) for pred, targ in zip(preds, targs)]
+    with open(args.input) as fp:
+        preds = fp.readlines()
 
-print(f"BLEU: {np.mean(scores)*100.0}")
-            
+    assert len(targs) == len(preds)
+
+    print(f"number of examples: {len(preds)}")
+
+    scores = [cal_bleu(pred, targ, 0) for pred, targ in zip(preds, targs)]
+
+    print(f"BLEU: {np.mean(scores)*100.0}")
