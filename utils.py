@@ -77,6 +77,13 @@ def load_dictionary(name):
     return dictionary
 
 def load_data(name):
+    """
+    NOTE:
+        The `h5py` package behaves differently between v2 and v3 on string data.
+        The string data may be stored in bytes format.
+        With version 2, you can call `str.decode('utf-8')` function.
+        With version 3, you can call `dataset.asstr()` function.
+    """
     h5f = h5py.File(name, "r")
     data = (h5f["sents"], h5f["synts"])
     return data
