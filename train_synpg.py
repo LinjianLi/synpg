@@ -19,7 +19,7 @@ parser.add_argument('--model_dir', type=str, default="./model/",
                        help="directory to save models")
 parser.add_argument('--load_model', type=str, default="none",
                        help="load pretrained model")
-parser.add_argument('--output_dir', type=str, default="./output/",
+parser.add_argument('--output_dir', type=str, default="auto",
                        help="directory to save outputs")
 parser.add_argument('--bpe_codes_path', type=str, default='./data/bpe.codes',
                        help="bpe codes file")
@@ -61,17 +61,25 @@ parser.add_argument('--temp', type=float, default=0.5,
                        help="temperature for generating outputs")
 parser.add_argument('--seed', type=int, default=0, 
                        help="random seed")
+parser.add_argument('--gpuid', type=str, default="-1",
+                       help="cuda visible devices")
 args = parser.parse_args()
+
+if args.output_dir.lower() == "auto":
+    args.output_dir = os.path.join(args.model_dir, "output")
 
 # create folders
 make_path(args.model_dir)
 make_path(args.output_dir)
 
+if args.gpuid != "-1":
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpuid
+
 import logging, time
 logging.basicConfig(
     handlers=[
         logging.FileHandler(
-            filename="./{}/log-{}.log".format(
+            filename="./{}/log-train-{}.log".format(
                 args.model_dir,
                 time.strftime("%Y-%m-%dT%H%M%S", time.gmtime())
             ),
@@ -87,7 +95,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 logger.info(pformat(vars(args)))
-logger.info("")
 
 # fix random seed
 np.random.seed(args.seed)
@@ -385,8 +392,8 @@ if args.train_data_subset != -1:
 
 train_idxs = np.arange(len(train_data[0]))
 valid_idxs = np.arange(len(valid_data[0]))
-logger.info(f"number of train examples: {len(train_data[0])}")
-logger.info(f"number of valid examples: {len(valid_data[0])}")
+logger.info(f"number of train examples: {len(train_idxs):,}")
+logger.info(f"number of valid examples: {len(valid_idxs):,}")
 
 train_loader = DataLoader(train_idxs, batch_size=args.batch_size, shuffle=True)
 valid_loader = DataLoader(valid_idxs, batch_size=args.batch_size, shuffle=False)
@@ -413,13 +420,17 @@ for name, parameter in model.named_parameters():
         continue
     num_param = parameter.numel()
     total_params += num_param
-logger.info("Total Trainable Params: {}".format(total_params))
+logger.info("Total Trainable Params: {:,}".format(total_params))
 
 logger.info("==== start training ====")
 for epoch in range(1, args.n_epoch+1):
     # training
+    start = time.time()
     train(epoch, model, train_data, valid_data, train_loader, valid_loader, optimizer, criterion, dictionary, bpe, args)
+    time_elapsed = time.time() - start
+    logger.info("Time elapsed for epoch {}: {}".format(epoch, time.strftime("%H:%M:%S", time.gmtime(time_elapsed))))
     # save model
     torch.save(model.state_dict(), os.path.join(args.model_dir, "synpg_epoch{:02d}.pt".format(epoch)))
+    logger.info("Model saved to: {}".format(os.path.join(args.model_dir, "synpg_epoch{:02d}.pt".format(epoch))))
     # shuffle training data
     train_loader = DataLoader(train_idxs, batch_size=args.batch_size, shuffle=True)
